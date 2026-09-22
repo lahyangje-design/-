@@ -38,6 +38,7 @@ try:
     cpi_df = bundle.get("cpi_df", pd.DataFrame())
     market_rates_df = bundle.get("market_rates_df", pd.DataFrame())
     test_data = bundle.get("test_data", pd.DataFrame())
+    sim_df = bundle.get("sim_df", pd.DataFrame())
 except Exception as e:
     st.error(f"모델 파일을 불러오지 못했습니다: {e}")
     st.stop()
@@ -136,11 +137,12 @@ st.title("🏛️ K-FedWatch: 한국은행 금융통화위원회 기준금리 �
 st.caption("CME FedWatch 벤치마킹 하이브리드 엔진 | 단기 채권 시장 내재 확률(60%) + 거시·NLP AI 모델(40%) 결합")
 
 # --------------------------------------------------------------------------
-# 6. 7대 메인 탭 구성
+# 6. 8대 메인 탭 구성
 # --------------------------------------------------------------------------
-tab_oct, tab_why, tab_aug, tab_rate, tab_tone, tab_oil, tab_fx = st.tabs([
+tab_oct, tab_why, tab_hist, tab_aug, tab_rate, tab_tone, tab_oil, tab_fx = st.tabs([
     "🏛️ 10월 금리 예측",
     "🔍 왜 그렇게 나왔을까? (원인 분석)",
+    "⏳ 과거 회의 예측 시뮬레이터 (2024~)",
     "📅 8월 예측 및 성적표",
     "🏦 기준금리 변동 현황",
     "📝 금통위 어조(Tone) 추이",
@@ -217,20 +219,12 @@ with tab_why:
     """)
 
     st.markdown("#### 1. 시장 호가(60%) vs AI 모델(40%) 확률 기여도 분해")
-    mkt_contrib_cut = round(mkt_p_cut * w_mkt, 1)
-    mkt_contrib_hold = round(mkt_p_hold * w_mkt, 1)
-    mkt_contrib_hike = round(mkt_p_hike * w_mkt, 1)
-
-    ai_contrib_cut = round(ai_p_cut * w_ai, 1)
-    ai_contrib_hold = round(ai_p_hold * w_ai, 1)
-    ai_contrib_hike = round(ai_p_hike * w_ai, 1)
-
     decomp_df = pd.DataFrame({
         "시나리오": ["인하 (-25bp)", "동결 (0bp)", "인상 (+25bp)"],
         "채권시장 순수 확률 (60% 가중)": [f"{mkt_p_cut:.1f}%", f"{mkt_p_hold:.1f}%", f"{mkt_p_hike:.1f}%"],
         "AI 모델 순수 확률 (40% 가중)": [f"{ai_p_cut:.1f}%", f"{ai_p_hold:.1f}%", f"{ai_p_hike:.1f}%"],
-        "시장 기여분 (A)": [mkt_contrib_cut, mkt_contrib_hold, mkt_contrib_hike],
-        "AI 기여분 (B)": [ai_contrib_cut, ai_contrib_hold, ai_contrib_hike],
+        "시장 기여분 (A)": [round(mkt_p_cut * w_mkt, 1), round(mkt_p_hold * w_mkt, 1), round(mkt_p_hike * w_mkt, 1)],
+        "AI 기여분 (B)": [round(ai_p_cut * w_ai, 1), round(ai_p_hold * w_ai, 1), round(ai_p_hike * w_ai, 1)],
         "최종 결합 확률 (A+B)": [f"{final_cut:.1f}%", f"{final_hold:.1f}%", f"{final_hike:.1f}%"]
     })
     st.dataframe(decomp_df, use_container_width=True)
@@ -264,7 +258,110 @@ with tab_why:
         st.plotly_chart(fig_fi, use_container_width=True)
 
 # ==========================================================================
-# [TAB 3] 8월 예측 및 성적표 (실적 검증)
+# [TAB 3] 과거 회의 예측 시뮬레이터 (2024~ 현재) ★ 신규 추가 ★
+# ==========================================================================
+with tab_hist:
+    st.subheader("⏳ 역대 금통위 예측 백테스트 및 시뮬레이터 (2024 ~ 2026)")
+    st.markdown("""
+    조회하고 싶은 **금통위 회의 날짜**를 선택하면, **해당 회의 직전 시점까지의 데이터만으로 모델이 계산했던 예측 확률**과
+    **실제 한국은행의 결정 결과**, 그리고 **당시 거시경제 지표 상황**을 재현합니다.
+    """)
+
+    # 시뮬레이션 대상 데이터 확인 (sim_df 우선, 없을 시 test_data 활용)
+    target_sim = sim_df if not sim_df.empty else (test_data[test_data["date"] >= "2024-01-01"] if not test_data.empty else pd.DataFrame())
+
+    if not target_sim.empty and "date" in target_sim.columns:
+        # 날짜 문자열 리스트
+        date_list = target_sim["date"].dt.strftime("%Y-%m-%d").tolist()
+        
+        col_sel1, col_sel2 = st.columns([2, 3])
+        with col_sel1:
+            selected_date = st.selectbox("📅 조회할 금통위 회의 일자 선택:", options=date_list, index=len(date_list)-1)
+        
+        # 선택된 회의의 로우 추출
+        row = target_sim[target_sim["date"].dt.strftime("%Y-%m-%d") == selected_date].iloc[0]
+        
+        # 실제결정 vs 예측결정
+        actual_dec = row.get("실제결정", "동결(0)")
+        pred_dec = row.get("예측결정", "동결(0)")
+        is_hit = (actual_dec == pred_dec)
+        
+        p_cut = row.get("종합_인하확률(%)", 0.0)
+        p_hold = row.get("종합_동결확률(%)", 0.0)
+        p_hike = row.get("종합_인상확률(%)", 0.0)
+        
+        with col_sel2:
+            if is_hit:
+                st.success(f"### ✅ 예측 적중! (모델 예측: {pred_dec} ➔ 실제 한은 결정: {actual_dec})")
+            else:
+                st.error(f"### ⚠️ 시장 서프라이즈 (모델 예측: {pred_dec} ➔ 실제 한은 결정: {actual_dec})")
+
+        st.markdown("---")
+        
+        # 1. 당시 예측 확률 지표 카드
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("회의 당시 기준금리", f"{row.get('base_rate', 0.0):.2f}%")
+        c2.metric("🔵 인하 확률", f"{p_cut:.1f}%")
+        c3.metric("⚪ 동결 확률", f"{p_hold:.1f}%")
+        c4.metric("🔴 인상 확률", f"{p_hike:.1f}%")
+
+        col_h_chart, col_h_table = st.columns([3, 2])
+        with col_h_chart:
+            fig_hist_pie = go.Figure(data=[go.Pie(
+                labels=["인하", "동결", "인상"],
+                values=[p_cut, p_hold, p_hike],
+                hole=0.55,
+                marker_colors=["#5bc0de", "#d6d8db", "#d9534f"],
+                textinfo="label+percent"
+            )])
+            fig_hist_pie.update_layout(
+                title=f"{selected_date} 회의 직전 모델 내재 확률 분포",
+                template="plotly_white",
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig_hist_pie, use_container_width=True)
+
+        with col_h_table:
+            st.subheader("📊 당시 거시/시장 환경 스냅샷")
+            snap_df = pd.DataFrame({
+                "지표명": [
+                    "통안채 91일 스프레드",
+                    "통안채 60일 이탈도",
+                    "장단기 커브 기울기",
+                    "소비자물가(CPI YoY)",
+                    "국제유가 30일 변동률",
+                    "원/달러 환율 30일 변동률",
+                    "의사록 톤 점수"
+                ],
+                "당시 수치": [
+                    f"{row.get('msb_spread_bp', 0.0):+.1f} bp",
+                    f"{row.get('net_shift_bp', 0.0):+.1f} bp",
+                    f"{row.get('curve_slope_bp', 0.0):+.1f} bp",
+                    f"{row.get('cpi_yoy', 0.0):.2f}%",
+                    f"{row.get('oil_change_pct', 0.0):+.2f}%",
+                    f"{row.get('fx_change_pct', 0.0):+.2f}%",
+                    f"{row.get('tone_score', 0.0):+.4f}"
+                ]
+            })
+            st.table(snap_df)
+
+        st.markdown("---")
+        st.markdown("#### 📋 2024 ~ 2026 전체 회의 백테스트 이력 일람표")
+        
+        # 요약 정확도 계산
+        total_meetings = len(target_sim)
+        hit_meetings = int((target_sim["실제결정"] == target_sim["예측결정"]).sum())
+        hit_ratio = (hit_meetings / total_meetings) * 100
+        
+        st.info(f"💡 **2024~2026 구간 누적 적중률:** 총 **{total_meetings}회** 회의 중 **{hit_meetings}회** 적중 (**{hit_ratio:.1f}%**)")
+        
+        table_cols = [c for c in ["date", "base_rate", "실제결정", "예측결정", "종합_인하확률(%)", "종합_동결확률(%)", "종합_인상확률(%)", "tone_score"] if c in target_sim.columns]
+        st.dataframe(target_sim[table_cols], use_container_width=True)
+    else:
+        st.warning("과거 시뮬레이션 데이터를 불러오는 중입니다. Colab에서 업데이트된 번들을 다운로드받아 업로드해주세요.")
+
+# ==========================================================================
+# [TAB 4] 8월 예측 및 성적표
 # ==========================================================================
 with tab_aug:
     st.subheader("📅 2026년 8월 27일 금통위 예측 결과 및 백테스트 성적표")
@@ -305,11 +402,8 @@ with tab_aug:
         )
         st.plotly_chart(fig_stack, use_container_width=True)
 
-        st.markdown("#### 최근 10회 회의 예측 vs 실제 결정 테이블")
-        show_cols = [c for c in ["date", "실제결정", "예측결정", "종합_인하확률(%)", "종합_동결확률(%)", "종합_인상확률(%)", "tone_score"] if c in test_data.columns]
-        st.dataframe(test_data[show_cols].tail(10), use_container_width=True)
 # ==========================================================================
-# [TAB 4] 기준금리 변동 현황
+# [TAB 5] 기준금리 변동 현황
 # ==========================================================================
 with tab_rate:
     st.subheader("🏦 한국은행 기준금리 변경 역사 (1999 ~ 2026)")
@@ -345,7 +439,7 @@ with tab_rate:
             """)
 
 # ==========================================================================
-# [TAB 5] 금통위 어조(Tone) 추이
+# [TAB 6] 금통위 어조(Tone) 추이
 # ==========================================================================
 with tab_tone:
     st.subheader("📝 금통위 의사록 어조(Tone Score) 변동 추이")
@@ -373,7 +467,7 @@ with tab_tone:
         st.plotly_chart(fig_tone, use_container_width=True)
 
 # ==========================================================================
-# [TAB 6] 국제유가(WTI) 변동 현황
+# [TAB 7] 국제유가(WTI) 변동 현황
 # ==========================================================================
 with tab_oil:
     st.subheader("🛢️ 국제유가(WTI 원유 선물) 가격 및 변동률 추이")
@@ -395,10 +489,8 @@ with tab_oil:
         )
         st.plotly_chart(fig_oil, use_container_width=True)
 
-        st.caption("※ 국제유가 급등락은 한국은행의 수입물가 및 인플레이션 전망에 직결되어 금리 결정에 큰 가중치를 가집니다.")
-
 # ==========================================================================
-# [TAB 7] 원/달러 환율 변동 현황
+# [TAB 8] 원/달러 환율 변동 현황
 # ==========================================================================
 with tab_fx:
     st.subheader("💵 원/달러(USD/KRW) 환율 및 변동률 추이")
@@ -419,5 +511,3 @@ with tab_fx:
             template="plotly_white"
         )
         st.plotly_chart(fig_fx, use_container_width=True)
-
-        st.caption("※ 원/달러 환율의 급격한 상승은 자본 유출 방어 및 수입물가 안정을 위한 금리 인상 요인으로 작동합니다.")
