@@ -458,15 +458,25 @@ with tab_us:
     """)
     
     us_data_to_use = live_us_df if not live_us_df.empty else bundle.get("us_rate", pd.DataFrame())
-    
     if not us_data_to_use.empty and not rate_df.empty:
+        # 1. 두 테이블의 date 타입을 동일한 datetime64(시간대 제거)로 강제 통일
+        df_us_clean = us_data_to_use.copy()
+        df_us_clean["date"] = pd.to_datetime(df_us_clean["date"]).dt.tz_localize(None)
+        df_us_clean = df_us_clean.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+        df_kr_clean = rate_df[["date", "base_rate"]].copy()
+        df_kr_clean["date"] = pd.to_datetime(df_kr_clean["date"]).dt.tz_localize(None)
+        df_kr_clean = df_kr_clean.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+        # 2. 안전한 merge_asof 실행
         df_spread = pd.merge_asof(
-            us_data_to_use.sort_values("date"),
-            rate_df[["date", "base_rate"]].sort_values("date"),
+            df_us_clean,
+            df_kr_clean,
             on="date",
             direction="backward"
         ).ffill().bfill()
         df_spread["spread_bp"] = (df_spread["base_rate"] - df_spread["us_fed_rate"]) * 100
+
         
         fig_us = go.Figure()
         fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["base_rate"], name="한국 기준금리 (%)", line=dict(color="#1f77b4", width=2.5)))
