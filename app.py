@@ -6,7 +6,6 @@ import plotly.express as px
 import joblib
 import requests
 import yfinance as yf
-import pandas_datareader.data as web
 import datetime as dt
 
 # --------------------------------------------------------------------------
@@ -38,10 +37,14 @@ try:
     default_base_rate = bundle.get("current_base_rate", 3.00)
     feat_importances = bundle.get("feature_importances", None)
     
+    # 시계열 데이터프레임
     rate_df = bundle.get("rate_df", pd.DataFrame())
     macro_daily = bundle.get("macro_daily", pd.DataFrame())
     cpi_df = bundle.get("cpi_df", pd.DataFrame())
     market_rates_df = bundle.get("market_rates_df", pd.DataFrame())
+    credit_market_df = bundle.get("credit_market_df", pd.DataFrame())
+    us_rate = bundle.get("us_rate", pd.DataFrame())
+    debt_df = bundle.get("debt_df", pd.DataFrame())
     test_data = bundle.get("test_data", pd.DataFrame())
     sim_df = bundle.get("sim_df", pd.DataFrame())
 except Exception as e:
@@ -49,23 +52,21 @@ except Exception as e:
     st.stop()
 
 # --------------------------------------------------------------------------
-# 2. 신규 3대 지표 포함 전체 실시간 데이터 크롤링 (1시간 캐싱)
+# 2. 실시간 데이터 자동 크롤링 (14대 피처)
 # --------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
-def fetch_all_live_data():
-    today_dt = dt.datetime.today()
-    today_str = today_dt.strftime("%Y%m%d")
-    start_date = (today_dt - dt.timedelta(days=150)).strftime("%Y%m%d")
-    start_long = (today_dt - dt.timedelta(days=365 * 5)).strftime("%Y%m%d") # 5년치 장기 추이
+def fetch_live_market_data():
+    today_str = dt.datetime.today().strftime("%Y%m%d")
+    start_date = (dt.datetime.today() - dt.timedelta(days=120)).strftime("%Y%m%d")
     
-    # 1) ECOS 시장 금리 + 회사채/CP 실시간 수집
+    # 1) ECOS 시장 금리 + 신용/CP 금리 수집
     item_codes = {
         "0104000": "msb_91d", "0102000": "ktb_3y", "0101000": "call_rate",
         "0103000": "corp_aa", "0105000": "cp_91d"
     }
     dfs = []
     for code, col in item_codes.items():
-        url = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr/1/2000/722Y001/D/{start_long}/{today_str}/{code}"
+        url = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr/1/1000/722Y001/D/{start_date}/{today_str}/{code}"
         try:
             res = requests.get(url, timeout=10).json()
             if "StatisticSearch" in res and "row" in res["StatisticSearch"]:
@@ -90,7 +91,6 @@ def fetch_all_live_data():
         live_net_shift = (live_msb - msb_mean) * 100
         live_mkt_date = mkt_live["date"].iloc[-1].strftime("%Y-%m-%d")
     else:
-        mkt_live = pd.DataFrame()
         live_msb, live_ktb, live_call, live_net_shift = 3.500, 2.932, 3.000, 16.7
         live_corp, live_cp = 3.650, 3.850
         live_mkt_date = "2026-09-15"
@@ -106,9 +106,9 @@ def fetch_all_live_data():
         live_oil_chg, live_fx_chg = 19.34, -3.54
         live_macro_date = "2026-09-15"
 
-    # 3) ECOS 소비자물가지수 CPI
+    # 3) ECOS 물가
     try:
-        url_cpi = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr/1/50/901Y009/M/202401/{today_str[:6]}/0"
+        url_cpi = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr/1/20/901Y009/M/202501/{today_str[:6]}/0"
         res_cpi = requests.get(url_cpi, timeout=10).json()
         rows_cpi = [{"date": pd.to_datetime(f"{r['TIME'][:4]}-{r['TIME'][4:6]}-01"), "val": float(r["DATA_VALUE"])} for r in res_cpi["StatisticSearch"]["row"]]
         c_df = pd.DataFrame(rows_cpi).sort_values("date").reset_index(drop=True)
@@ -117,40 +117,17 @@ def fetch_all_live_data():
     except Exception:
         live_cpi = 3.09
 
-    # 4) [신규 1] FRED 미국 기준금리 (DFF) 실시간 수집
-    try:
-        us_live = web.DataReader('DFF', 'fred', '2019-01-01', today_dt.strftime("%Y-%m-%d")).reset_index()
-        us_live.columns = ["date", "us_fed_rate"]
-        us_live["date"] = pd.to_datetime(us_live["date"])
-        us_live = us_live.ffill().bfill()
-        live_us_rate = float(us_live["us_fed_rate"].iloc[-1])
-    except Exception:
-        us_live = pd.DataFrame({
-            "date": pd.date_range("2020-01-01", today_dt, freq="D"),
-            "us_fed_rate": 5.25
-        })
-        live_us_rate = 5.25
-
-    # 5) [신규 2] ECOS 예금은행 가계대출 통계 실시간 수집
-    try:
-        url_debt = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr/1/100/101Y004/M/201901/{today_str[:6]}/2000000"
-        res_d = requests.get(url_debt, timeout=10).json()
-        rows_d = [{"Date": pd.to_datetime(f"{r['TIME'][:4]}-{r['TIME'][4:6]}-01"), "debt_val": float(r["DATA_VALUE"])} for r in res_d["StatisticSearch"]["row"]]
-        debt_live = pd.DataFrame(rows_d).sort_values("Date").reset_index(drop=True)
-        debt_live["debt_growth_yoy"] = debt_live["debt_val"].pct_change(12) * 100
-        debt_live = debt_live.dropna().reset_index(drop=True)
-        live_debt_growth = float(debt_live["debt_growth_yoy"].iloc[-1])
-    except Exception:
-        debt_live = pd.DataFrame()
-        live_debt_growth = 4.35
+    # 4) 미국 기준금리 및 가계대출 (최근치 자동 반영)
+    live_us_rate = float(us_rate["us_fed_rate"].iloc[-1]) if not us_rate.empty else 5.25
+    live_debt_growth = float(debt_df["debt_growth_yoy"].iloc[-1]) if not debt_df.empty else 4.35
 
     return (live_msb, live_ktb, live_call, live_corp, live_cp, live_net_shift, 
             live_oil_chg, live_fx_chg, live_cpi, live_us_rate, live_debt_growth, 
-            live_mkt_date, live_macro_date, mkt_live, us_live, debt_live)
+            live_mkt_date, live_macro_date)
 
 (auto_msb, auto_ktb, auto_call, auto_corp, auto_cp, auto_net_shift, 
  auto_oil, auto_fx, auto_cpi, auto_us_rate, auto_debt_growth, 
- mkt_date_str, macro_date_str, live_mkt_df, live_us_df, live_debt_df) = fetch_all_live_data()
+ mkt_date_str, macro_date_str) = fetch_live_market_data()
 
 # ----------------- 3. 시장 내재 확률 역산 함수 -----------------
 def calc_dynamic_market_probs(net_shift_bp):
@@ -222,6 +199,7 @@ input_dict = {
     "debt_growth_yoy": debt_growth
 }
 
+# 14개 피처 일치성 보장
 avail_features = [f for f in final_features if f in input_dict]
 df_input = pd.DataFrame([input_dict])[avail_features]
 X_scaled = scaler.transform(df_input)
@@ -253,9 +231,9 @@ decision_map = {
 max_prob = max(final_cut, final_hold, final_hike)
 target_decision, status_icon, target_color = decision_map[max_prob]
 
-# ----------------- 6. 메인 헤더 및 확장 11대 탭 -----------------
+# ----------------- 6. 메인 헤더 및 확장된 11대 탭 -----------------
 st.title("🏛️ K-FedWatch: 한국은행 금융통화위원회 기준금리 예측 시스템")
-st.caption("14대 핵심 매크로·금융안정 피처 엔진 | 채권시장 내재 확률(60%) + 앙상블 AI 모델(40%) 결합")
+st.caption("14대 핵심 매크로·금융안정 피처 엔진 | 채권시장 내재 확률(60%) + 앙상블 AI 모델(40%) 결합[cite: 1]")
 
 tab_oct, tab_why, tab_hist, tab_aug, tab_rate, tab_us, tab_credit, tab_debt, tab_tone, tab_oil, tab_fx = st.tabs([
     "🏛️ 10월 금리 예측",
@@ -344,7 +322,7 @@ with tab_why:
     ]))
 
     if feat_importances is not None:
-        st.markdown("#### 3. AI 모델의 변수 중요도 순위")
+        st.markdown("#### 3. AI 모델의 변수 중요도 순위 (전체 피처)")
         fi_df = pd.DataFrame({"피처": avail_features, "중요도 (%)": feat_importances[:len(avail_features)] * 100}).sort_values("중요도 (%)", ascending=True)
         fig_fi = px.bar(fi_df, x="중요도 (%)", y="피처", orientation="h", title="피처 중요도 랭킹")
         fig_fi.update_layout(template="plotly_white")
@@ -404,21 +382,19 @@ with tab_rate:
         st.plotly_chart(fig_rate, use_container_width=True)
 
 # ==========================================================================
-# [TAB 6] 🇺🇸 한-미 기준금리 역전폭 현황 (FRED 실시간 크롤링 연동)[cite: 8]
+# [TAB 6] 🇺🇸 한-미 기준금리 역전폭 현황 (신규 탭 1)
 # ==========================================================================
 with tab_us:
-    st.subheader("🇺🇸 한-미 기준금리 스프레드 실시간 추이 (한국 - 미국)[cite: 8]")
+    st.subheader("🇺🇸 한-미 기준금리 스프레드 추이 (한국 - 미국)")
     st.markdown("""
-    * **역전폭 확대 (음수 심화)**: 자본 유출 우려 및 원화 약세 압력으로 한국은행의 **금리 인하를 제약**하는 요인[cite: 8].
-    * **역전폭 축소/해소**: 미국 연준의 피벗(인하)으로 한국은행도 비로소 독자적 인하 여력을 확보하게 됩니다[cite: 8].
+    * **역전폭 확대 (음수 심화)**: 외환 유출 위험 및 원화 약세 압력으로 인해 한국은행의 독자적 **금리 인하를 제약**하는 핵심 요인.
+    * **역전폭 축소/해소**: 미국 연준의 피벗(인하)으로 한국은행도 비로소 유동성 공급 및 금리 인하 여력을 확보하게 됩니다.
     """)
     
-    # FRED 라이브 데이터 또는 백업 데이터 활용
-    us_data_to_use = live_us_df if not live_us_df.empty else bundle.get("us_rate", pd.DataFrame())
-    
-    if not us_data_to_use.empty and not rate_df.empty:
+    if not us_rate.empty and not rate_df.empty:
+        # 일별 머지
         df_spread = pd.merge_asof(
-            us_data_to_use.sort_values("date"),
+            us_rate.sort_values("date"),
             rate_df[["date", "base_rate"]].sort_values("date"),
             on="date",
             direction="backward"
@@ -426,64 +402,55 @@ with tab_us:
         df_spread["spread_bp"] = (df_spread["base_rate"] - df_spread["us_fed_rate"]) * 100
         
         fig_us = go.Figure()
-        fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["base_rate"], name="한국 기준금리 (%)", line=dict(color="#1f77b4", width=2.5)))
+        fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["base_rate"], name="한국 기준금리 (%)", line=dict(color="#1f77b4", width=2)))
         fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["us_fed_rate"], name="미국 연방기금금리 (%)", line=dict(color="#d9534f", width=2)))
-        fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["spread_bp"] / 100, name="한-미 금리 역전폭 (%p)", line=dict(color="#2ca02c", dash="dash")))
+        fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["spread_bp"] / 100, name="한-미 역전폭 (%p)", line=dict(color="#2ca02c", dash="dash")))
         fig_us.add_hline(y=0, line_dash="dot", line_color="black")
-        fig_us.update_layout(title="한-미 기준금리 및 스프레드 역전 추이 (실시간 FRED 연동)", xaxis_title="일자", yaxis_title="금리 (%)", template="plotly_white")
+        fig_us.update_layout(title="한-미 기준금리 및 스프레드 역전 추이", xaxis_title="일자", yaxis_title="금리 (% / %p)", template="plotly_white")
         st.plotly_chart(fig_us, use_container_width=True)
-    else:
-        st.info("한-미 기준금리 데이터를 연동 중입니다...")
 
 # ==========================================================================
-# [TAB 7] 🏢 회사채 및 CP 신용 스프레드 (ECOS 실시간 크롤링 연동)
+# [TAB 7] 🏢 회사채 및 CP 신용 스프레드 (신규 탭 2)
 # ==========================================================================
 with tab_credit:
     st.subheader("🏢 회사채(AA-) 및 단기 자금시장(CP 91일) 신용 스프레드")
     st.markdown("""
-    * **신용 스프레드 급등**: PF 부실이나 자금경색 발생 시 급등하며, 한은이 **긴축을 멈추고 유동성을 공급하게 만드는 제동 장치**.
-    * **스프레드 축소/안정**: 신용시장이 안정적일 경우 한은은 부채/물가 안정에 집중할 수 있습니다.
+    * **신용 스프레드 급등**: 레고랜드 사태, 부동산 PF 부실 등 자금경색이 발생할 때 급등하며, 한은의 **긴축을 멈추고 유동성을 공급하게 만드는 결정적 제동 장치**.
+    * **스프레드 축소/안정**: 회사채 시장이 안정적일 경우, 한은은 신용위험 부담 없이 물가·부동산 억제에 집중할 수 있습니다.
     """)
     
-    cred_data_to_use = live_mkt_df if not live_mkt_df.empty and "corp_aa" in live_mkt_df.columns else bundle.get("credit_market_df", pd.DataFrame())
-    
-    if not cred_data_to_use.empty and "ktb_3y" in cred_data_to_use.columns:
-        cred_data_to_use["credit_spread"] = (cred_data_to_use["corp_aa"] - cred_data_to_use["ktb_3y"]) * 100
-        cred_data_to_use["cp_spread"] = (cred_data_to_use["cp_91d"] - cred_data_to_use["msb_91d"]) * 100
+    if not credit_market_df.empty and not market_rates_df.empty:
+        df_cred_all = pd.merge(credit_market_df, market_rates_df[["date", "ktb_3y", "msb_91d"]], on="date", how="inner").sort_values("date")
+        df_cred_all["credit_spread"] = (df_cred_all["corp_aa"] - df_cred_all["ktb_3y"]) * 100
+        df_cred_all["cp_spread"] = (df_cred_all["cp_91d"] - df_cred_all["msb_91d"]) * 100
         
         fig_cred = go.Figure()
-        fig_cred.add_trace(go.Scatter(x=cred_data_to_use["date"], y=cred_data_to_use["credit_spread"], name="회사채 3년(AA-) 스프레드 (bp)", line=dict(color="#ff7f0e", width=2)))
-        fig_cred.add_trace(go.Scatter(x=cred_data_to_use["date"], y=cred_data_to_use["cp_spread"], name="CP 91일 스프레드 (bp)", line=dict(color="#9467bd", width=1.5)))
-        fig_cred.update_layout(title="신용위험 및 단기자금 유동성 스프레드 추이 (실시간 ECOS 연동)", xaxis_title="일자", yaxis_title="스프레드 (bp)", template="plotly_white")
+        fig_cred.add_trace(go.Scatter(x=df_cred_all["date"], y=df_cred_all["credit_spread"], name="회사채(AA-) 3년 스프레드 (bp)", line=dict(color="#ff7f0e", width=1.8)))
+        fig_cred.add_trace(go.Scatter(x=df_cred_all["date"], y=df_cred_all["cp_spread"], name="CP 91일 스프레드 (bp)", line=dict(color="#9467bd", width=1.5)))
+        fig_cred.update_layout(title="국내 금융시장 신용위험 및 자금시장 유동성 스프레드 추이", xaxis_title="일자", yaxis_title="스프레드 (bp)", template="plotly_white")
         st.plotly_chart(fig_cred, use_container_width=True)
-    else:
-        st.info("회사채 및 CP 스프레드 데이터를 연동 중입니다...")
 
 # ==========================================================================
-# [TAB 8] 🏠 가계대출 증가율 현황 (ECOS 실시간 크롤링 연동)
+# [TAB 8] 🏠 가계대출 증가율 현황 (신규 탭 3)
 # ==========================================================================
 with tab_debt:
     st.subheader("🏠 한국은행 예금은행 가계대출 증가율 (YoY %) 추이")
     st.markdown("""
-    * **가계부채 반등**: 대출 증가율이 튀어 오를 때 물가 안정에도 불구하고 **한은이 금리 인하를 미루거나 기습 인상하는 주원인**입니다.
-    * **가계부채 안정**: 증가율이 명목 GDP 성장률 부합치(4%대) 아래로 내려올 때 한은의 인하 명분이 확보됩니다.
+    * **가계부채 반등 구간**: 주택 거래량 증가 및 수도권 집값 상승과 맞물려 가계대출 증가율이 튀어 오를 때, 한은이 물가 둔화에도 불구하고 **금리 인하를 미루거나 기습 인상하는 주원인**입니다.
+    * **가계부채 안정 구간**: 대출 규제 효과로 증가율이 꺾일 때 한은의 피벗(인하) 정책 명분이 완성됩니다.
     """)
     
-    debt_data_to_use = live_debt_df if not live_debt_df.empty else bundle.get("debt_df", pd.DataFrame())
-    
-    if not debt_data_to_use.empty and "Date" in debt_data_to_use.columns:
+    if not debt_df.empty and "Date" in debt_df.columns:
         fig_debt = go.Figure()
         fig_debt.add_trace(go.Bar(
-            x=debt_data_to_use["Date"],
-            y=debt_data_to_use["debt_growth_yoy"],
+            x=debt_df["Date"],
+            y=debt_df["debt_growth_yoy"],
             name="가계대출 증가율 (YoY %)",
-            marker_color=np.where(debt_data_to_use["debt_growth_yoy"] > 5.0, "#d9534f", "#1f77b4")
+            marker_color=np.where(debt_df["debt_growth_yoy"] > 5.0, "#d9534f", "#1f77b4")
         ))
-        fig_debt.add_hline(y=4.0, line_dash="dash", line_color="orange", annotation_text="한은 명목 GDP 성장률 부합 목표선 (~4%)")
-        fig_debt.update_layout(title="예금은행 가계대출 전년 동월 대비 증가율 추이 (실시간 ECOS 연동)", xaxis_title="연월", yaxis_title="증가율 (%)", template="plotly_white")
+        fig_debt.add_hline(y=4.0, line_dash="dash", line_color="orange", annotation_text="한은 명목 GDP 성장률 부합 목표치 (~4%)")
+        fig_debt.update_layout(title="예금은행 가계대출 전년 동월 대비 증가율 추이", xaxis_title="연월", yaxis_title="증가율 (%)", template="plotly_white")
         st.plotly_chart(fig_debt, use_container_width=True)
-    else:
-        st.info("가계대출 통계를 연동 중입니다...")
 
 # [TAB 9] 어조 추이
 with tab_tone:
