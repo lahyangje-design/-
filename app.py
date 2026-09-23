@@ -440,9 +440,8 @@ with tab_rate:
         fig_rate = go.Figure(data=[go.Scatter(x=rate_df["date"], y=rate_df["base_rate"], mode="lines+markers", line_shape="hv", line=dict(color="#1f77b4", width=2.5))])
         fig_rate.update_layout(title="역대 기준금리 추이 (Step Chart)", xaxis_title="일자", yaxis_title="기준금리 (%)", template="plotly_white")
         st.plotly_chart(fig_rate, use_container_width=True)
-
 # ==========================================================================
-# [TAB 6] 🇺🇸 한-미 기준금리 역전폭 현황 (실시간 FRED 라이브 연동)
+# [TAB 6] 🇺🇸 한-미 기준금리 역전폭 현황 (MergeError 영구 차단)
 # ==========================================================================
 with tab_us:
     st.subheader("🇺🇸 한-미 기준금리 스프레드 실시간 추이 (한국 - 미국)")
@@ -454,17 +453,13 @@ with tab_us:
     
     if not live_us_df.empty and not rate_df.empty:
         df_u = live_us_df[["date", "us_fed_rate"]].copy()
-        df_u["date"] = pd.to_datetime(df_u["date"]).dt.tz_localize(None)
+        df_u["date"] = pd.to_datetime(df_u["date"])
         
         df_k = rate_df[["date", "base_rate"]].copy()
-        df_k["date"] = pd.to_datetime(df_k["date"]).dt.tz_localize(None)
+        df_k["date"] = pd.to_datetime(df_k["date"])
         
-        df_spread = pd.merge_asof(
-            df_u.sort_values("date"),
-            df_k.sort_values("date"),
-            on="date",
-            direction="backward"
-        ).ffill().bfill()
+        # ★ merge_asof 대신 단위 충돌 없는 outer merge 사용
+        df_spread = pd.merge(df_u, df_k, on="date", how="outer").sort_values("date").ffill().bfill().reset_index(drop=True)
         df_spread["spread_bp"] = (df_spread["base_rate"] - df_spread["us_fed_rate"]) * 100
         
         fig_us = go.Figure()
