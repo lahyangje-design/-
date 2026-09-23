@@ -6,3 +6,4 @@ plotly
 joblib
 yfinance
 requests
+pandas-datareader
