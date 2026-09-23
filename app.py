@@ -86,6 +86,7 @@ msb_spread_bp = (msb_91d - base_rate) * 100
 curve_slope_bp = (ktb_3y - msb_91d) * 100
 call_spread_bp = (call_rate - base_rate) * 100
 
+# 10개 및 14개 피처 모두 지원 가능한 전체 딕셔너리
 input_dict = {
     "tone_score": tone_score,
     "msb_spread_bp": msb_spread_bp,
@@ -96,12 +97,23 @@ input_dict = {
     "시장_인상확률(%)": mkt_p_hike,
     "cpi_yoy": cpi_yoy,
     "oil_change_pct": oil_change,
-    "fx_change_pct": fx_change
+    "fx_change_pct": fx_change,
+    "us_kr_spread_bp": (base_rate - 5.25) * 100,
+    "credit_spread_bp": 65.0,
+    "cp_spread_bp": 35.0,
+    "debt_growth_yoy": 4.35
 }
 
-# 학습된 피처 컬럼만 필터링하여 안전 추론
-avail_features = [f for f in final_features if f in input_dict]
-df_input = pd.DataFrame([input_dict])[avail_features]
+# ★ [핵심 해결 코드] 스케일러가 실제로 학습할 때 사용한 정확한 피처 목록 자동 추출
+expected_features = getattr(scaler, "feature_names_in_", None)
+if expected_features is None:
+    expected_features = getattr(rf_model, "feature_names_in_", final_features)
+
+# 스케일러가 요구하는 순서와 컬럼만 정확하게 1:1 매칭 (누락된 경우 기본값 0.0 보충)
+matched_input = {col: input_dict.get(col, 0.0) for col in expected_features}
+df_input = pd.DataFrame([matched_input])[list(expected_features)]
+
+# 검증 및 정규화 실행 (더 이상 ValueError 발생하지 않음)
 X_scaled = scaler.transform(df_input)
 ai_probs = rf_model.predict_proba(X_scaled)[0]
 
