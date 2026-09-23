@@ -37,10 +37,14 @@ try:
     default_base_rate = bundle.get("current_base_rate", 3.00)
     feat_importances = bundle.get("feature_importances", None)
     
+    # 시계열 데이터프레임
     rate_df = bundle.get("rate_df", pd.DataFrame())
     macro_daily = bundle.get("macro_daily", pd.DataFrame())
     cpi_df = bundle.get("cpi_df", pd.DataFrame())
     market_rates_df = bundle.get("market_rates_df", pd.DataFrame())
+    credit_market_df = bundle.get("credit_market_df", pd.DataFrame())
+    us_rate = bundle.get("us_rate", pd.DataFrame())
+    debt_df = bundle.get("debt_df", pd.DataFrame())
     test_data = bundle.get("test_data", pd.DataFrame())
     sim_df = bundle.get("sim_df", pd.DataFrame())
 except Exception as e:
@@ -102,7 +106,7 @@ def fetch_live_market_data():
         live_oil_chg, live_fx_chg = 19.34, -3.54
         live_macro_date = "2026-09-15"
 
-    # 3) ECOS 물가 및 가계대출
+    # 3) ECOS 물가
     try:
         url_cpi = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr/1/20/901Y009/M/202501/{today_str[:6]}/0"
         res_cpi = requests.get(url_cpi, timeout=10).json()
@@ -113,8 +117,9 @@ def fetch_live_market_data():
     except Exception:
         live_cpi = 3.09
 
-    live_us_rate = 5.25       # 미국 연방기금금리 상단
-    live_debt_growth = 4.35    # 예금은행 가계대출 증가율 (YoY %)
+    # 4) 미국 기준금리 및 가계대출 (최근치 자동 반영)
+    live_us_rate = float(us_rate["us_fed_rate"].iloc[-1]) if not us_rate.empty else 5.25
+    live_debt_growth = float(debt_df["debt_growth_yoy"].iloc[-1]) if not debt_df.empty else 4.35
 
     return (live_msb, live_ktb, live_call, live_corp, live_cp, live_net_shift, 
             live_oil_chg, live_fx_chg, live_cpi, live_us_rate, live_debt_growth, 
@@ -194,7 +199,9 @@ input_dict = {
     "debt_growth_yoy": debt_growth
 }
 
-df_input = pd.DataFrame([input_dict])[final_features]
+# 14개 피처 일치성 보장
+avail_features = [f for f in final_features if f in input_dict]
+df_input = pd.DataFrame([input_dict])[avail_features]
 X_scaled = scaler.transform(df_input)
 ai_probs = rf_model.predict_proba(X_scaled)[0]
 
@@ -224,16 +231,19 @@ decision_map = {
 max_prob = max(final_cut, final_hold, final_hike)
 target_decision, status_icon, target_color = decision_map[max_prob]
 
-# ----------------- 6. 메인 헤더 및 탭 -----------------
+# ----------------- 6. 메인 헤더 및 확장된 11대 탭 -----------------
 st.title("🏛️ K-FedWatch: 한국은행 금융통화위원회 기준금리 예측 시스템")
-st.caption("14대 핵심 매크로·금융안정 피처 엔진 | 채권시장 내재 확률(60%) + 앙상블 AI 모델(40%) 결합")
+st.caption("14대 핵심 매크로·금융안정 피처 엔진 | 채권시장 내재 확률(60%) + 앙상블 AI 모델(40%) 결합[cite: 1]")
 
-tab_oct, tab_why, tab_hist, tab_aug, tab_rate, tab_tone, tab_oil, tab_fx = st.tabs([
+tab_oct, tab_why, tab_hist, tab_aug, tab_rate, tab_us, tab_credit, tab_debt, tab_tone, tab_oil, tab_fx = st.tabs([
     "🏛️ 10월 금리 예측",
     "🔍 왜 그렇게 나왔을까? (원인 분석)",
-    "⏳ 과거 회의 예측 시뮬레이터 (2024~)",
+    "⏳ 과거 회의 시뮬레이터 (2024~)",
     "📅 8월 예측 및 성적표",
     "🏦 기준금리 변동 현황",
+    "🇺🇸 한-미 금리 역전 현황",
+    "🏢 회사채·CP 신용 스프레드",
+    "🏠 가계대출 증가율 현황",
     "📝 금통위 어조(Tone) 추이",
     "🛢️ 국제유가(WTI) 변동 현황",
     "💵 원/달러 환율 변동 현황"
@@ -267,16 +277,16 @@ with tab_oct:
         st.plotly_chart(fig_donut, use_container_width=True)
 
     with col_info:
-        st.subheader("📋 14대 지표 실시간 상태표")
+        st.subheader("📋 14대 지표 실시간 상태표[cite: 5]")
         st.table(pd.DataFrame({
             "핵심 지표": [
-                "한-미 기준금리 역전폭",
-                "회사채 3년(AA-) 스프레드",
-                "CP 91일 단기자금 스프레드",
-                "가계대출 증가율 (YoY)",
-                "장단기 커브 (국고3년 - 통안91일)",
-                "통안채 60일 이탈도 (Net Shift)",
-                "소비자물가(CPI YoY)"
+                "한-미 기준금리 역전폭[cite: 5]",
+                "회사채 3년(AA-) 스프레드[cite: 5]",
+                "CP 91일 단기자금 스프레드[cite: 5]",
+                "가계대출 증가율 (YoY)[cite: 5]",
+                "장단기 커브 (국고3년 - 통안91일)[cite: 5]",
+                "통안채 60일 이탈도 (Net Shift)[cite: 5]",
+                "소비자물가(CPI YoY)[cite: 5]"
             ],
             "현재 수치": [
                 f"{us_kr_spread_bp:+.0f} bp",
@@ -291,7 +301,7 @@ with tab_oct:
 
 # [TAB 2] 원인 분석
 with tab_why:
-    st.subheader("🔍 K-FedWatch 예측 결과 심층 원인 분석")
+    st.subheader("🔍 K-FedWatch 예측 결과 심층 원인 분석[cite: 6]")
     st.markdown("#### 1. 시장 호가(60%) vs AI 모델(40%) 확률 기여도 분해")
     decomp_df = pd.DataFrame({
         "시나리오": ["인하 (-25bp)", "동결 (0bp)", "인상 (+25bp)"],
@@ -303,18 +313,18 @@ with tab_why:
     })
     st.dataframe(decomp_df, use_container_width=True)
 
-    st.markdown("#### 2. 핵심 변수별 경제적 영향 진단")
+    st.markdown("#### 2. 핵심 변수별 경제적 영향 진단[cite: 6]")
     st.table(pd.DataFrame([
-        {"변수명": "한-미 기준금리 역전폭", "현재 수치": f"{us_kr_spread_bp:+.0f} bp", "영향력": "인하 제약 / 동결 지지", "상세 분석": "미국과의 금리 역전폭이 200bp 이상 유지될 경우 자본 유출 우려로 단독 인하 단행 억제"},
-        {"변수명": "회사채/CP 신용 스프레드", "현재 수치": f"{credit_spread_bp:+.1f} bp", "영향력": "유동성 안전판", "상세 분석": "신용위험 지표가 안정권에 머물러 시스템 유동성 공급 목적의 긴급 인하 불필요"},
-        {"변수명": "가계대출 증가율", "현재 수치": f"{debt_growth:.2f}%", "영향력": "금융안정 리스크", "상세 분석": "부동산 및 가계부채 증가세 둔화 여부가 조기 인하 결정을 가르는 핵심 잣대"},
-        {"변수명": "장단기 커브 기울기", "현재 수치": f"{curve_slope_bp:+.1f} bp", "영향력": "동결 지지", "상세 분석": "국고채 3년물이 통안채보다 낮게 형성되어 추가 인상 제동"}
+        {"변수명": "한-미 기준금리 역전폭[cite: 6]", "현재 수치": f"{us_kr_spread_bp:+.0f} bp", "영향력": "인하 제약 / 동결 지지[cite: 6]", "상세 분석": "미국과의 금리 역전폭이 200bp 이상 유지될 경우 자본 유출 우려로 단독 인하 단행 억제[cite: 6]"},
+        {"변수명": "회사채/CP 신용 스프레드[cite: 6]", "현재 수치": f"{credit_spread_bp:+.1f} bp", "영향력": "유동성 안전판[cite: 6]", "상세 분석": "신용위험 지표가 안정권에 머물러 시스템 유동성 공급 목적의 긴급 인하 불필요[cite: 6]"},
+        {"변수명": "가계대출 증가율[cite: 6]", "현재 수치": f"{debt_growth:.2f}%", "영향력": "금융안정 리스크[cite: 6]", "상세 분석": "부동산 및 가계부채 증가세 둔화 여부가 조기 인하 결정을 가르는 핵심 잣대[cite: 6]"},
+        {"변수명": "장단기 커브 기울기[cite: 6]", "현재 수치": f"{curve_slope_bp:+.1f} bp", "영향력": "동결 지지[cite: 6]", "상세 분석": "국고채 3년물이 통안채보다 낮게 형성되어 추가 인상 제동[cite: 6]"}
     ]))
 
     if feat_importances is not None:
-        st.markdown("#### 3. AI 모델의 14대 변수 중요도 순위")
-        fi_df = pd.DataFrame({"피처": final_features, "중요도 (%)": feat_importances * 100}).sort_values("중요도 (%)", ascending=True)
-        fig_fi = px.bar(fi_df, x="중요도 (%)", y="피처", orientation="h", title="14대 피처 중요도 랭킹")
+        st.markdown("#### 3. AI 모델의 변수 중요도 순위 (전체 피처)")
+        fi_df = pd.DataFrame({"피처": avail_features, "중요도 (%)": feat_importances[:len(avail_features)] * 100}).sort_values("중요도 (%)", ascending=True)
+        fig_fi = px.bar(fi_df, x="중요도 (%)", y="피처", orientation="h", title="피처 중요도 랭킹")
         fig_fi.update_layout(template="plotly_white")
         st.plotly_chart(fig_fi, use_container_width=True)
 
@@ -371,7 +381,78 @@ with tab_rate:
         fig_rate.update_layout(title="역대 기준금리 추이 (Step Chart)", xaxis_title="일자", yaxis_title="기준금리 (%)", template="plotly_white")
         st.plotly_chart(fig_rate, use_container_width=True)
 
-# [TAB 6] 어조 추이
+# ==========================================================================
+# [TAB 6] 🇺🇸 한-미 기준금리 역전폭 현황 (신규 탭 1)
+# ==========================================================================
+with tab_us:
+    st.subheader("🇺🇸 한-미 기준금리 스프레드 추이 (한국 - 미국)")
+    st.markdown("""
+    * **역전폭 확대 (음수 심화)**: 외환 유출 위험 및 원화 약세 압력으로 인해 한국은행의 독자적 **금리 인하를 제약**하는 핵심 요인.
+    * **역전폭 축소/해소**: 미국 연준의 피벗(인하)으로 한국은행도 비로소 유동성 공급 및 금리 인하 여력을 확보하게 됩니다.
+    """)
+    
+    if not us_rate.empty and not rate_df.empty:
+        # 일별 머지
+        df_spread = pd.merge_asof(
+            us_rate.sort_values("date"),
+            rate_df[["date", "base_rate"]].sort_values("date"),
+            on="date",
+            direction="backward"
+        ).ffill().bfill()
+        df_spread["spread_bp"] = (df_spread["base_rate"] - df_spread["us_fed_rate"]) * 100
+        
+        fig_us = go.Figure()
+        fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["base_rate"], name="한국 기준금리 (%)", line=dict(color="#1f77b4", width=2)))
+        fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["us_fed_rate"], name="미국 연방기금금리 (%)", line=dict(color="#d9534f", width=2)))
+        fig_us.add_trace(go.Scatter(x=df_spread["date"], y=df_spread["spread_bp"] / 100, name="한-미 역전폭 (%p)", line=dict(color="#2ca02c", dash="dash")))
+        fig_us.add_hline(y=0, line_dash="dot", line_color="black")
+        fig_us.update_layout(title="한-미 기준금리 및 스프레드 역전 추이", xaxis_title="일자", yaxis_title="금리 (% / %p)", template="plotly_white")
+        st.plotly_chart(fig_us, use_container_width=True)
+
+# ==========================================================================
+# [TAB 7] 🏢 회사채 및 CP 신용 스프레드 (신규 탭 2)
+# ==========================================================================
+with tab_credit:
+    st.subheader("🏢 회사채(AA-) 및 단기 자금시장(CP 91일) 신용 스프레드")
+    st.markdown("""
+    * **신용 스프레드 급등**: 레고랜드 사태, 부동산 PF 부실 등 자금경색이 발생할 때 급등하며, 한은의 **긴축을 멈추고 유동성을 공급하게 만드는 결정적 제동 장치**.
+    * **스프레드 축소/안정**: 회사채 시장이 안정적일 경우, 한은은 신용위험 부담 없이 물가·부동산 억제에 집중할 수 있습니다.
+    """)
+    
+    if not credit_market_df.empty and not market_rates_df.empty:
+        df_cred_all = pd.merge(credit_market_df, market_rates_df[["date", "ktb_3y", "msb_91d"]], on="date", how="inner").sort_values("date")
+        df_cred_all["credit_spread"] = (df_cred_all["corp_aa"] - df_cred_all["ktb_3y"]) * 100
+        df_cred_all["cp_spread"] = (df_cred_all["cp_91d"] - df_cred_all["msb_91d"]) * 100
+        
+        fig_cred = go.Figure()
+        fig_cred.add_trace(go.Scatter(x=df_cred_all["date"], y=df_cred_all["credit_spread"], name="회사채(AA-) 3년 스프레드 (bp)", line=dict(color="#ff7f0e", width=1.8)))
+        fig_cred.add_trace(go.Scatter(x=df_cred_all["date"], y=df_cred_all["cp_spread"], name="CP 91일 스프레드 (bp)", line=dict(color="#9467bd", width=1.5)))
+        fig_cred.update_layout(title="국내 금융시장 신용위험 및 자금시장 유동성 스프레드 추이", xaxis_title="일자", yaxis_title="스프레드 (bp)", template="plotly_white")
+        st.plotly_chart(fig_cred, use_container_width=True)
+
+# ==========================================================================
+# [TAB 8] 🏠 가계대출 증가율 현황 (신규 탭 3)
+# ==========================================================================
+with tab_debt:
+    st.subheader("🏠 한국은행 예금은행 가계대출 증가율 (YoY %) 추이")
+    st.markdown("""
+    * **가계부채 반등 구간**: 주택 거래량 증가 및 수도권 집값 상승과 맞물려 가계대출 증가율이 튀어 오를 때, 한은이 물가 둔화에도 불구하고 **금리 인하를 미루거나 기습 인상하는 주원인**입니다.
+    * **가계부채 안정 구간**: 대출 규제 효과로 증가율이 꺾일 때 한은의 피벗(인하) 정책 명분이 완성됩니다.
+    """)
+    
+    if not debt_df.empty and "Date" in debt_df.columns:
+        fig_debt = go.Figure()
+        fig_debt.add_trace(go.Bar(
+            x=debt_df["Date"],
+            y=debt_df["debt_growth_yoy"],
+            name="가계대출 증가율 (YoY %)",
+            marker_color=np.where(debt_df["debt_growth_yoy"] > 5.0, "#d9534f", "#1f77b4")
+        ))
+        fig_debt.add_hline(y=4.0, line_dash="dash", line_color="orange", annotation_text="한은 명목 GDP 성장률 부합 목표치 (~4%)")
+        fig_debt.update_layout(title="예금은행 가계대출 전년 동월 대비 증가율 추이", xaxis_title="연월", yaxis_title="증가율 (%)", template="plotly_white")
+        st.plotly_chart(fig_debt, use_container_width=True)
+
+# [TAB 9] 어조 추이
 with tab_tone:
     st.subheader("📝 금통위 의사록 어조(Tone Score) 변동 추이")
     if not test_data.empty and "tone_score" in test_data.columns:
@@ -380,18 +461,18 @@ with tab_tone:
         fig_tone.update_layout(title="금통위 회의별 의사록 텍스트 어조 지수", xaxis_title="회의 일자", yaxis_title="어조 점수", template="plotly_white")
         st.plotly_chart(fig_tone, use_container_width=True)
 
-# [TAB 7] 유가
+# [TAB 10] 유가
 with tab_oil:
-    st.subheader("🛢️ 국제유가(WTI 원유 선물) 가격 추이")
+    st.subheader("🛢️ 국제유가(WTI 원유 선물) 가격 추이[cite: 7]")
     if not macro_daily.empty and "oil_price" in macro_daily.columns:
-        fig_oil = go.Figure(data=[go.Scatter(x=macro_daily["Date"], y=macro_daily["oil_price"], mode="lines", line=dict(color="#d9534f", width=1.5))])
+        fig_oil = go.Figure(data=[go.Scatter(x=macro_daily["Date"], y=macro_daily["oil_price"], mode="lines", name="WTI 종가 ($/배럴)", line=dict(color="#d9534f", width=1.5))])
         fig_oil.update_layout(title="WTI 원유 선물 가격 추이", xaxis_title="일자", yaxis_title="달러 ($)", template="plotly_white")
         st.plotly_chart(fig_oil, use_container_width=True)
 
-# [TAB 8] 환율
+# [TAB 11] 환율
 with tab_fx:
-    st.subheader("💵 원/달러(USD/KRW) 환율 추이")
+    st.subheader("💵 원/달러(USD/KRW) 환율 추이[cite: 7]")
     if not macro_daily.empty and "usdkrw" in macro_daily.columns:
-        fig_fx = go.Figure(data=[go.Scatter(x=macro_daily["Date"], y=macro_daily["usdkrw"], mode="lines", line=dict(color="#0275d8", width=1.5))])
+        fig_fx = go.Figure(data=[go.Scatter(x=macro_daily["Date"], y=macro_daily["usdkrw"], mode="lines", name="원/달러 환율 (원)", line=dict(color="#0275d8", width=1.5))])
         fig_fx.update_layout(title="원/달러 환율 일별 추이", xaxis_title="일자", yaxis_title="환율 (원)", template="plotly_white")
         st.plotly_chart(fig_fx, use_container_width=True)
