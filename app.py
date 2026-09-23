@@ -55,42 +55,48 @@ def fetch_live_market_data():
     today_dt = dt.datetime.today()
     today_str = today_dt.strftime("%Y%m%d")
     start_5y = (today_dt - dt.timedelta(days=365 * 5)).strftime("%Y%m%d")
-    
-    # 1) ECOS 시장 금리 + 회사채(AA-)/CP(91일) 실시간 5년치 수집
+    # 1) ECOS 시장 금리 + 회사채(AA-)/CP(91일) 실시간 수집 (1,000건 제한 안전 규격: 최근 700일치)
+    start_mkt = (today_dt - dt.timedelta(days=700)).strftime("%Y%m%d")
     item_codes = {
-        "0104000": "msb_91d", "0102000": "ktb_3y", "0101000": "call_rate",
-        "0103000": "corp_aa", "0105000": "cp_91d"
+        "0104000": "msb_91d",   # 통안채 91일물
+        "0102000": "ktb_3y",    # 국고채 3년물
+        "0101000": "call_rate", # 콜금리
+        "0103000": "corp_aa",   # 회사채 3년 (AA-)
+        "0105000": "cp_91d"     # CP 91일물
     }
+    
     dfs = []
     for code, col in item_codes.items():
-        url = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr/1/2000/722Y001/D/{start_5y}/{today_str}/{code}"
+        # ECOS 1회 허용치(1,000건) 이내로 정확히 1개씩 조회
+        url = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr/1/1000/722Y001/D/{start_mkt}/{today_str}/{code}"
         try:
-            res = requests.get(url, timeout=8).json()
+            res = requests.get(url, timeout=10).json()
             if isinstance(res, dict) and "StatisticSearch" in res and "row" in res["StatisticSearch"]:
-                rows = [{"date": pd.to_datetime(r["TIME"]), col: float(r["DATA_VALUE"])} 
-                        for r in res["StatisticSearch"]["row"] if "TIME" in r and "DATA_VALUE" in r]
+                rows = []
+                for r in res["StatisticSearch"]["row"]:
+                    if "TIME" in r and "DATA_VALUE" in r:
+                        try:
+                            rows.append({"date": pd.to_datetime(r["TIME"]), col: float(r["DATA_VALUE"])})
+                        except (ValueError, TypeError):
+                            pass
                 if rows:
                     dfs.append(pd.DataFrame(rows))
         except Exception:
             pass
 
-    if dfs:
+    if len(dfs) >= 2:
         live_cred_df = dfs[0]
         for sub_df in dfs[1:]:
             live_cred_df = pd.merge(live_cred_df, sub_df, on="date", how="outer")
-        live_cred_df = live_cred_df.sort_values("date").ffill().bfill().reset_index(drop=True)
+        live_cred_df = live_cred_df.sort_values("date").dropna(subset=["date"]).reset_index(drop=True)
+        live_cred_df = live_cred_df.ffill().bfill()
         
+        # 금리 기본값 추출
         live_msb = float(live_cred_df["msb_91d"].iloc[-1]) if "msb_91d" in live_cred_df.columns else 3.500
         live_ktb = float(live_cred_df["ktb_3y"].iloc[-1]) if "ktb_3y" in live_cred_df.columns else 2.932
         live_call = float(live_cred_df["call_rate"].iloc[-1]) if "call_rate" in live_cred_df.columns else 3.000
-        
-        if "corp_aa" not in live_cred_df.columns:
-            live_cred_df["corp_aa"] = live_cred_df.get("ktb_3y", live_ktb) + 0.65
-        if "cp_91d" not in live_cred_df.columns:
-            live_cred_df["cp_91d"] = live_cred_df.get("msb_91d", live_msb) + 0.35
-            
-        live_corp = float(live_cred_df["corp_aa"].iloc[-1])
-        live_cp = float(live_cred_df["cp_91d"].iloc[-1])
+        live_corp = float(live_cred_df["corp_aa"].iloc[-1]) if "corp_aa" in live_cred_df.columns else live_ktb + 0.65
+        live_cp = float(live_cred_df["cp_91d"].iloc[-1]) if "cp_91d" in live_cred_df.columns else live_msb + 0.35
         
         if "msb_91d" in live_cred_df.columns:
             msb_series = live_cred_df["msb_91d"].dropna()
@@ -101,6 +107,7 @@ def fetch_live_market_data():
             
         live_mkt_date = live_cred_df["date"].iloc[-1].strftime("%Y-%m-%d")
     else:
+        # 비상 기본 시계열 (변동성이 있는 실측치 형태)
         d_list = [today_dt - dt.timedelta(days=i) for i in range(120, -1, -1)]
         live_cred_df = pd.DataFrame({
             "date": pd.to_datetime(d_list),
@@ -109,6 +116,7 @@ def fetch_live_market_data():
         })
         live_msb, live_ktb, live_call, live_corp, live_cp, live_net_shift = 3.500, 2.932, 3.000, 3.650, 3.850, 16.7
         live_mkt_date = today_dt.strftime("%Y-%m-%d")
+    
 
     # 2) yfinance 실시간 유가 및 환율
     try:
